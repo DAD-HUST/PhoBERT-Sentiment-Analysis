@@ -11,17 +11,18 @@ from torch.utils.data import TensorDataset, DataLoader
 from fairseq.data.encoders.fastbpe import fastBPE
 from fairseq.data import Dictionary
 from vncorenlp import VnCoreNLP
-from transformers import *
+from transformers import AdamW, get_linear_schedule_with_warmup, get_constant_schedule
 from transformers.modeling_utils import *
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from utils import *
 from models import *
-from tqdm import tqdm
 import logging
+from tqdm import tqdm
+tqdm.pandas()
 
-#### Just some code to print debug information to stdout
+
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S',
                     level=logging.INFO)
@@ -66,22 +67,12 @@ vocab.add_from_file(args.dict_path)
 # Load data
 logging.info("Loading data...")
 train_df = pd.read_csv(args.train_path)
-# Preprocessing
-logging.info("Preprocessing...")
-train_df['number_of_words'] = train_df['text'].progress_apply(lambda x: len(str(x).strip().split()))
-no_text = train_df[train_df['number_of_words'] < 2]
-train_df.drop(no_text.index,inplace=True)
-no_text = train_df[train_df['text'] == 'content']
-train_df.drop(no_text.index,inplace=True)
-no_text = train_df[train_df['text'].isnull()]
-train_df.drop(no_text.index, inplace=True)
-train_df.reset_index(drop=True, inplace=True)
+
 # Tokenize
 logging.info("Tokenizing...")
 train_df["text"] = train_df["text"].progress_apply(lambda x: ' '.join([' '.join(sent) for sent in rdrsegmenter.tokenize(x)]))
-train_df.to_csv("./data/token_data.csv", index=False, encoding="utf-8")
-logging.info("Converting to tensor...")
 X_train = convert_lines(train_df, vocab, bpe, args.max_sequence_length)
+
 # Label encoder
 lb = LabelEncoder()
 y = train_df.label.values
@@ -96,7 +87,7 @@ config = RobertaConfig.from_pretrained(
 )
 
 model = RobertaVN.from_pretrained(args.pretrained_path, config=config)
-model.eval()
+# model.eval()
 model.to(device)
 
 if torch.cuda.device_count():
@@ -125,44 +116,45 @@ scheduler0 = get_constant_schedule(optimizer)
 if not os.path.exists(args.checkpoint_path):
     os.mkdir(args.checkpoint_path)
 
-splits = list(StratifiedKFold(n_splits=5, shuffle=True, random_state=32).split(X_train, y))
-for fold, (train_idx, val_idx) in enumerate(splits):
-    logging.info("Training for fold {}".format(fold))
-    best_score = 0
-    if fold != args.fold:
-        continue
-    train_dataset = TensorDataset(torch.tensor(X_train[train_idx], dtype=torch.long), torch.tensor(y[train_idx], dtype=torch.long))
-    valid_dataset = TensorDataset(torch.tensor(X_train[val_idx], dtype=torch.long), torch.tensor(y[val_idx], dtype=torch.long))
-    for child in tsfm.children():
-        for param in child.parameters():
-            if not param.requires_grad():
-                print("whoopsies")
-            param.requires_grad = False
-    
-    frozen = True
-    for epoch in tqdm(range(args.epochs + 1), desc="Training epoch..."):
-        if epoch > 0 and frozen:
-            for child in tsfm.children():
-                for param in child.parameters():
-                    param.requires_grad = True
-            frozen = False
-            del scheduler0
-            torch.cuda.empty_cache()
-        
-        val_preds = 0
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
-        avg_loss = 0
-        avg_accuracy = 0
 
-        optimizer.zero_grad()
-        process_bar = tqdm(enumerate(train_loader), total=len(train_loader), leave=False, desc="Training...")
+X_train, X_val, y_train, y_val = train_test_split(X_train, y, test_size=0.2, stratify=y)
+
+best_score = 0
+early_stopping = 0
+train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.long), torch.tensor(y_train, dtype=torch.long))
+valid_dataset = TensorDataset(torch.tensor(X_val, dtype=torch.long), torch.tensor(y_val, dtype=torch.long))
+for child in tsfm.children():
+    for param in child.parameters():
+        if not param.requires_grad:
+            pass
+        param.requires_grad = False
+
+frozen = True
+for epoch in range(args.epochs):
+    if epoch > 0 and frozen:
+        for child in tsfm.children():
+            for param in child.parameters():
+                param.requires_grad = True
+        frozen = False
+        del scheduler0
+        torch.cuda.empty_cache()
+    
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
+    total_loss = 0.
+    train_preds = None
+    
+    optimizer.zero_grad()
+    model.train()   
+    with tqdm(enumerate(train_loader), total=len(train_loader), unit="batch") as process_bar:
         for step, (x_batch, y_batch) in process_bar:
-            model.train()
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
-            y_pred = model(x_batch, attention_mask=(x_batch > 0).to(device)).to(device)
-            loss = F.binary_cross_entropy_with_logits(y_pred.view(-1), y_batch.float())
+            process_bar.set_description(f"Epoch {epoch}...")
+            
+            y_pred = model(x_batch.to(device), attention_mask=(x_batch > 0).to(device))
+            predictions = y_pred.squeeze().detach().cpu().numpy()
+            train_preds = np.atleast_1d(predictions) if train_preds is None else np.concatenate([train_preds, np.atleast_1d(predictions)])
+            # compute loss
+            loss = F.binary_cross_entropy_with_logits(y_pred.view(-1).to(device), y_batch.float().to(device))
             loss = loss.mean()
             loss.backward()
 
@@ -174,22 +166,34 @@ for fold, (train_idx, val_idx) in enumerate(splits):
                 else:
                     scheduler0.step()
             process_bar.set_postfix(loss=loss.item())
-            avg_loss += loss.item() / len(train_loader)
-        
-        model.eval()
-        process_bar = tqdm(enumerate(valid_loader), total=len(valid_loader), leave=False, desc="Validating...")
-        for step, (x_batch, y_batch) in process_bar:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
-            with torch.no_grad():
-                y_pred = model(x_batch, attention_mask=(x_batch > 0).to(device))
-                y_pred = y_pred.squeeze().detach().cpu().numpy()
-                val_preds = np.atleast_1d(y_pred) if val_preds is None else np.concatenate([val_preds, np.atleast_1d(y_pred)])
-        val_preds = sigmoid(val_preds)
-        best_th = 0
-        score = f1_score(y[val_idx], val_preds > 0.5)
-        print(f"\nAUC = {roc_auc_score(y[val_idx], val_preds):.4f}, F1 score @0.5 = {score:.4f}")
-        if score >= best_score:
-            torch.save(model.state_dict(), os.path.join(args.checkpoint_path, f"model_{fold}.bin"))
-            logging.info("Saving model to {}".format(os.path.join(args.checkpoint_path, f"model_{fold}.bin")))
-            best_score = score
+            total_loss += loss.item()
+    train_preds = sigmoid(train_preds)
+    train_acc = accuracy_score(y_train, train_preds > 0.5) * 100
+    train_f1 = f1_score(y_train, train_preds > 0.5)
+    logging.info("Accuracy: {0:.4f}%".format(train_acc))
+    logging.info("F1 Score: {0:.4f}".format(train_f1))
+    logging.info("Average training loss: {0:.4f}".format(total_loss))
+
+    model.eval()
+    val_preds = None
+    process_bar = tqdm(enumerate(valid_loader), total=len(valid_loader), desc="Validating...")
+    for step, (x_batch, y_batch) in process_bar:
+        with torch.no_grad():
+            y_pred = model(x_batch.to(device), attention_mask=(x_batch > 0).to(device))
+            y_pred = y_pred.squeeze().detach().cpu().numpy()
+            # convert to 1d array
+            val_preds = np.atleast_1d(y_pred) if val_preds is None else np.concatenate([val_preds, np.atleast_1d(y_pred)])
+    val_preds = sigmoid(val_preds)
+
+    score = f1_score(y_val, val_preds > 0.5)
+    val_accuracy = accuracy_score(y_val, val_preds > 0.5)
+    logging.info(f"\nAUC: {roc_auc_score(y_val, val_preds):.4f}, F1 score @0.5: {score:.4f}, Accuracy: {round(val_accuracy * 100, 2)}%")
+    if score >= best_score:
+        torch.save(model.state_dict(), os.path.join(args.checkpoint_path, f"model_{epoch}.bin"))
+        best_score = score
+    else:
+        early_stopping += 1
+    
+    if early_stopping > 10:
+        logging.info("Early stopping at epoch {}".format(epoch))
+        break

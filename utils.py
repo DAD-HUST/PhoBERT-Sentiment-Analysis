@@ -16,7 +16,7 @@ def convert_lines(df, vocab, bpe, max_sequence_length):
     pad_id = 1
     eos_id = 2
 
-    for (idx, text, _, _) in tqdm(df.itertuples(name=None), total=len(df)): 
+    for (idx, text, _, _) in tqdm(df.itertuples(name=None), total=len(df)):
         subwords = bpe.encode('<s> '+ text +' </s>')
         input_ids = vocab.encode_line(subwords, append_eos=False, add_if_not_exist=False).long().tolist()
         if len(input_ids) > max_sequence_length: 
@@ -36,12 +36,3 @@ def seed_everything(SEED):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
-
-def save_pkl(path, obj):
-    with open(path, 'wb') as f:
-        pickle.dump(obj, f)
-
-def load_pkl(path):
-  with open(path, 'rb') as f:
-    obj = pickle.load(f)
-  return obj

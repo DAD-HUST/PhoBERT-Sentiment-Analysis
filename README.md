@@ -16,6 +16,18 @@ $wget https://public.vinai.io/PhoBERT_large_transformers.tar.gz
 $tar -xzvf PhoBERT_large_transformers.tar.gz
 ```
 
+## Install VnCoreNLP
+
+```shell
+!mkdir -p vncorenlp/models/wordsegmenter
+!wget -q --show-progress https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/VnCoreNLP-1.1.1.jar
+!wget -q --show-progress https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/vi-vocab
+!wget -q --show-progress https://raw.githubusercontent.com/vncorenlp/VnCoreNLP/master/models/wordsegmenter/wordsegmenter.rdr
+!mv VnCoreNLP-1.1.1.jar vncorenlp/ 
+!mv vi-vocab vncorenlp/models/wordsegmenter/
+!mv wordsegmenter.rdr vncorenlp/models/wordsegmenter/
+```
+
 ## Scripts
 
 ```shell
