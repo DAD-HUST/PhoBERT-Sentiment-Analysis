@@ -133,5 +133,6 @@ dmypy.json
 data/
 vncorenlp/
 PhoBERT_base_transformers/
+models/
 
 .vscode/

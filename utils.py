@@ -1,10 +1,9 @@
-import os
-import json
 import pickle
 
 import torch
 import numpy as np
 from tqdm import tqdm
+from sklearn.metrics import accuracy_score, f1_score
 tqdm.pandas()
 
 
@@ -36,3 +35,18 @@ def seed_everything(SEED):
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
+
+
+def flat_accuracy(preds, labels):
+    pred_flat = np.argmax(preds, axis=1).flatten()
+    labels_flat = labels.flatten()
+    return accuracy_score(labels_flat, pred_flat), f1_score(labels_flat, pred_flat)
+
+def save_pkl(path, obj):
+  with open(path, 'wb') as f:
+    pickle.dump(obj, f)
+
+def load_pkl(path):
+  with open(path, 'rb') as f:
+    obj = pickle.load(f)
+  return obj
